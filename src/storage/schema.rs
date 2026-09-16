@@ -17,7 +17,6 @@ const CREATE_SESSION_TABLE: &str = r#"
     );
 "#;
 
-
 const CREATE_PROVIDER_INDEX: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_session_provider
     ON sessions(provider);

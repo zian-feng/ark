@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, OptionalExtension, params};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
@@ -20,6 +20,20 @@ pub struct Session {
     pub starred: bool,
     pub created_at: DateTime<Utc>,
     pub last_opened_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub starred: bool,
+    pub session_id: String,
+    pub provider: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeSession {
+    pub session_id: String,
+    pub provider: String,
 }
 
 pub struct NewSession {
@@ -51,23 +65,28 @@ impl Database {
         let path = path.as_ref();
 
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("could not create Ark data directory:
-                  {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "could not create Ark data directory:
+                  {}",
+                    parent.display()
+                )
+            })?;
         }
 
         let connection = Connection::open(path)
-            .with_context(|| format!("could not open Ark database: {}",
-              path.display()))?;
-        
+            .with_context(|| format!("could not open Ark database: {}", path.display()))?;
+
         schema::initialize(&connection)?;
 
         Ok(Self { connection })
     }
 
     pub fn path_for_current_user() -> Result<PathBuf> {
-        let home = dirs::home_dir().context("could not determine the home
-          directory")?;
+        let home = dirs::home_dir().context(
+            "could not determine the home
+          directory",
+        )?;
         Ok(home.join(".ark").join("ark.db"))
     }
 
@@ -114,6 +133,65 @@ impl Database {
             last_opened_at: None,
         })
     }
+
+    pub fn remove_session(&self, session_id: &str) -> Result<()> {
+        let deleted_rows = self.connection.execute(
+            "DELETE FROM sessions WHERE session_id = ?1",
+            params![session_id],
+        )?;
+
+        if deleted_rows == 0 {
+            anyhow::bail!("no saved sessions with session id : `{session_id}`");
+        }
+
+        Ok(())
+    }
+
+    pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT starred, session_id, provider, description
+            FROM sessions
+            ORDER BY
+                starred DESC,
+                COALESCE(last_opened_at, created_at) DESC
+            "#,
+        )?;
+
+        let rows = statement.query_map([], |row| {
+            Ok(SessionSummary {
+                starred: row.get::<_, i64>(0)? != 0,
+                session_id: row.get(1)?,
+                provider: row.get(2)?,
+                description: row.get(3)?,
+            })
+        })?;
+
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn get_resume_session(&self, session_id: &str) -> Result<ResumeSession> {
+        let target = self
+            .connection
+            .query_row(
+                r#"
+                SELECT session_id, provider
+                FROM sessions
+                WHERE session_id = ?1
+                "#,
+                params![session_id],
+                |row| {
+                    Ok(ResumeSession {
+                        session_id: row.get(0)?,
+                        provider: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?
+            .with_context(|| format!("no saved session with ID `{session_id}`"))?;
+
+        Ok(target)
+    }
 }
 
 #[cfg(test)]
@@ -159,6 +237,54 @@ mod tests {
         assert_eq!(saved.provider, "codex");
         assert_eq!(saved.description, "");
         assert_eq!(saved.tags, Some(vec![]));
+
+        Ok(())
+    }
+
+    #[test]
+    fn removes_a_session() -> anyhow::Result<()> {
+        let temporary_directory = tempfile::tempdir()?;
+        let database = Database::open_at(temporary_directory.path().join("ark.db"))?;
+
+        database.add_session(NewSession {
+            id: "raw-session-123".to_owned(),
+            session_id: "raw-session-123".to_owned(),
+            provider: "codex".to_owned(),
+            cwd: PathBuf::from("/tmp/example-project"),
+            description: None,
+            tags: None,
+            starred: false,
+        })?;
+
+        database.remove_session("raw-session-123")?;
+
+        assert!(database.list_sessions()?.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn lists_session_summaries() -> anyhow::Result<()> {
+        let temporary_directory = tempfile::tempdir()?;
+        let database = Database::open_at(temporary_directory.path().join("ark.db"))?;
+
+        database.add_session(NewSession {
+            id: "raw-session-123".to_owned(),
+            session_id: "raw-session-123".to_owned(),
+            provider: "codex".to_owned(),
+            cwd: PathBuf::from("/tmp/example-project"),
+            description: Some("Example session".to_owned()),
+            tags: None,
+            starred: false,
+        })?;
+
+        let sessions = database.list_sessions()?;
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "raw-session-123");
+        assert_eq!(sessions[0].provider, "codex");
+        assert_eq!(sessions[0].description, "Example session");
+        assert!(!sessions[0].starred);
 
         Ok(())
     }
