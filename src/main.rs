@@ -3,6 +3,7 @@ use clap::Parser;
 
 mod cli;
 mod core;
+mod slug;
 mod storage;
 
 fn main() -> Result<()> {

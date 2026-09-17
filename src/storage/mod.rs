@@ -25,6 +25,7 @@ pub struct Session {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSummary {
     pub starred: bool,
+    pub id: String,
     pub session_id: String,
     pub provider: String,
     pub description: String,
@@ -134,14 +135,23 @@ impl Database {
         })
     }
 
-    pub fn remove_session(&self, session_id: &str) -> Result<()> {
+    pub fn remove_session(&self, key: &str) -> Result<()> {
         let deleted_rows = self.connection.execute(
-            "DELETE FROM sessions WHERE session_id = ?1",
-            params![session_id],
+            r#"
+                DELETE FROM sessions
+                WHERE rowid = (
+                    SELECT rowid
+                    FROM sessions
+                    WHERE id = ?1 OR session_id = ?1
+                    ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END
+                    LIMIT 1
+                )
+                "#,
+            params![key],
         )?;
 
         if deleted_rows == 0 {
-            anyhow::bail!("no saved sessions with session id : `{session_id}`");
+            anyhow::bail!("no saved session with alias or ID `{key}`");
         }
 
         Ok(())
@@ -150,7 +160,7 @@ impl Database {
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         let mut statement = self.connection.prepare(
             r#"
-            SELECT starred, session_id, provider, description
+            SELECT starred, id, session_id, provider, description
             FROM sessions
             ORDER BY
                 starred DESC,
@@ -161,25 +171,28 @@ impl Database {
         let rows = statement.query_map([], |row| {
             Ok(SessionSummary {
                 starred: row.get::<_, i64>(0)? != 0,
-                session_id: row.get(1)?,
-                provider: row.get(2)?,
-                description: row.get(3)?,
+                id: row.get(1)?,
+                session_id: row.get(2)?,
+                provider: row.get(3)?,
+                description: row.get(4)?,
             })
         })?;
 
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    pub fn get_resume_session(&self, session_id: &str) -> Result<ResumeSession> {
+    pub fn get_resume_session(&self, key: &str) -> Result<ResumeSession> {
         let target = self
             .connection
             .query_row(
                 r#"
                 SELECT session_id, provider
                 FROM sessions
-                WHERE session_id = ?1
+                WHERE id = ?1 OR session_id = ?1
+                ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END
+                LIMIT 1
                 "#,
-                params![session_id],
+                params![key],
                 |row| {
                     Ok(ResumeSession {
                         session_id: row.get(0)?,
@@ -188,7 +201,7 @@ impl Database {
                 },
             )
             .optional()?
-            .with_context(|| format!("no saved session with ID `{session_id}`"))?;
+            .with_context(|| format!("no saved session with alias or ID `{key}`"))?;
 
         Ok(target)
     }
@@ -224,7 +237,7 @@ mod tests {
         let database = Database::open_at(temporary_directory.path().join("ark.db"))?;
 
         let saved = database.add_session(NewSession {
-            id: "raw-session-123".to_owned(),
+            id: "auth-refactor".to_owned(),
             session_id: "raw-session-123".to_owned(),
             provider: "codex".to_owned(),
             cwd: PathBuf::from("/tmp/example-project"),
@@ -233,7 +246,7 @@ mod tests {
             starred: false,
         })?;
 
-        assert_eq!(saved.id, "raw-session-123");
+        assert_eq!(saved.id, "auth-refactor");
         assert_eq!(saved.provider, "codex");
         assert_eq!(saved.description, "");
         assert_eq!(saved.tags, Some(vec![]));
@@ -247,7 +260,29 @@ mod tests {
         let database = Database::open_at(temporary_directory.path().join("ark.db"))?;
 
         database.add_session(NewSession {
-            id: "raw-session-123".to_owned(),
+            id: "auth-refactor".to_owned(),
+            session_id: "raw-session-123".to_owned(),
+            provider: "codex".to_owned(),
+            cwd: PathBuf::from("/tmp/example-project"),
+            description: None,
+            tags: None,
+            starred: false,
+        })?;
+
+        database.remove_session("auth-refactor")?;
+
+        assert!(database.list_sessions()?.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn removes_a_session_by_native_id() -> anyhow::Result<()> {
+        let temporary_directory = tempfile::tempdir()?;
+        let database = Database::open_at(temporary_directory.path().join("ark.db"))?;
+
+        database.add_session(NewSession {
+            id: "auth-refactor".to_owned(),
             session_id: "raw-session-123".to_owned(),
             provider: "codex".to_owned(),
             cwd: PathBuf::from("/tmp/example-project"),
@@ -281,10 +316,36 @@ mod tests {
         let sessions = database.list_sessions()?;
 
         assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "raw-session-123");
         assert_eq!(sessions[0].session_id, "raw-session-123");
         assert_eq!(sessions[0].provider, "codex");
         assert_eq!(sessions[0].description, "Example session");
         assert!(!sessions[0].starred);
+
+        Ok(())
+    }
+
+    #[test]
+    fn finds_a_resume_session_by_alias_or_native_id() -> anyhow::Result<()> {
+        let temporary_directory = tempfile::tempdir()?;
+        let database = Database::open_at(temporary_directory.path().join("ark.db"))?;
+
+        database.add_session(NewSession {
+            id: "auth-refactor".to_owned(),
+            session_id: "raw-session-123".to_owned(),
+            provider: "codex".to_owned(),
+            cwd: PathBuf::from("/tmp/example-project"),
+            description: None,
+            tags: None,
+            starred: false,
+        })?;
+
+        let by_alias = database.get_resume_session("auth-refactor")?;
+        let by_native_id = database.get_resume_session("raw-session-123")?;
+
+        assert_eq!(by_alias.session_id, "raw-session-123");
+        assert_eq!(by_native_id.session_id, "raw-session-123");
+        assert_eq!(by_alias.provider, "codex");
 
         Ok(())
     }

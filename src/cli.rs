@@ -9,18 +9,21 @@ pub struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// resume a saved session by session_id
-    #[arg(value_name = "SESSION_ID")]
-    session_id: Option<String>,
+    /// Resume a saved session by its Ark alias or native session ID.
+    #[arg(value_name = "ALIAS")]
+    alias: Option<String>,
 }
 
 #[derive(Subcommand)]
 enum Command {
     /// add a session to ark using native session ID.
-    Add { session_id: String },
+    Add {
+        session_id: String,
+        alias: Option<String>,
+    },
 
-    /// removes a saved session from ark
-    Rm { session_id: String },
+    /// Remove a saved session from Ark by its alias or native session ID.
+    Rm { key: String },
 
     /// list all saved sessions.
     List,
@@ -28,20 +31,17 @@ enum Command {
 
 impl Cli {
     pub fn run(self) -> Result<()> {
-        let Cli {
-            command,
-            session_id,
-        } = self;
+        let Cli { command, alias } = self;
 
-        match (command, session_id) {
-            (Some(Command::Add { session_id }), None) => {
-                let session = core::add::add_new_session_codex(&session_id)?;
+        match (command, alias) {
+            (Some(Command::Add { session_id, alias }), None) => {
+                let session = core::add::add_new_session_codex(&session_id, alias.as_deref())?;
                 println!("Added `{}` ({} session)", session.id, session.provider);
             }
 
-            (Some(Command::Rm { session_id }), None) => {
-                core::remove::remove_session(&session_id)?;
-                println!("Removed `{session_id}` from Ark.");
+            (Some(Command::Rm { key }), None) => {
+                core::remove::remove_session(&key)?;
+                println!("Removed `{key}` from Ark.");
             }
 
             (Some(Command::List), None) | (None, None) => {
@@ -53,26 +53,31 @@ impl Cli {
                 }
 
                 println!(
-                    "{:<8}  {:<38}  {:<10}  DESCRIPTION",
-                    "STARRED", "SESSION ID", "PROVIDER"
+                    "     {:<25}  {:<38}  {:<10}  DESCRIPTION",
+                    "ALIAS", "SESSION ID", "PROVIDER"
                 );
 
                 for session in sessions {
-                    let starred = if session.starred { "*" } else { "" };
+                    let starred = if session.starred { "  *  " } else { "     " };
+                    let alias = if session.id == session.session_id {
+                        ""
+                    } else {
+                        &session.id
+                    };
 
                     println!(
-                        "{:<8}  {:<38}  {:<10}  {}",
-                        starred, session.session_id, session.provider, session.description
+                        "{}{:<25}  {:<38}  {:<10}  {}",
+                        starred, alias, session.session_id, session.provider, session.description
                     );
                 }
             }
 
-            (None, Some(session_id)) => {
-                core::open::open_session(&session_id)?;
+            (None, Some(alias)) => {
+                core::open::open_session(&alias)?;
             }
 
             (_, Some(_)) => {
-                bail!("a session ID cannot be combined with a subcommand");
+                bail!("an alias cannot be combined with a subcommand");
             }
         }
 
