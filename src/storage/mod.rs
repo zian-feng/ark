@@ -157,6 +157,29 @@ impl Database {
         Ok(())
     }
 
+    pub fn set_starred(&self, key: &str, starred: bool) -> Result<()> {
+        let updated_rows = self.connection.execute(
+            r#"
+            UPDATE sessions
+            SET starred = ?1
+            WHERE rowid = (
+                SELECT rowid
+                FROM sessions
+                WHERE id = ?2 OR session_id = ?2
+                ORDER BY CASE WHEN id = ?2 THEN 0 ELSE 1 END
+                LIMIT 1
+            )
+            "#,
+            params![if starred { 1 } else { 0 }, key],
+        )?;
+
+        if updated_rows == 0 {
+            anyhow::bail!("no saved session with alias or ID `{key}`");
+        }
+
+        Ok(())
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         let mut statement = self.connection.prepare(
             r#"
@@ -346,6 +369,30 @@ mod tests {
         assert_eq!(by_alias.session_id, "raw-session-123");
         assert_eq!(by_native_id.session_id, "raw-session-123");
         assert_eq!(by_alias.provider, "codex");
+
+        Ok(())
+    }
+
+    #[test]
+    fn sets_starred_status_by_alias_or_native_id() -> anyhow::Result<()> {
+        let temporary_directory = tempfile::tempdir()?;
+        let database = Database::open_at(temporary_directory.path().join("ark.db"))?;
+
+        database.add_session(NewSession {
+            id: "auth-refactor".to_owned(),
+            session_id: "raw-session-123".to_owned(),
+            provider: "codex".to_owned(),
+            cwd: PathBuf::from("/tmp/example-project"),
+            description: None,
+            tags: None,
+            starred: false,
+        })?;
+
+        database.set_starred("auth-refactor", true)?;
+        assert!(database.list_sessions()?[0].starred);
+
+        database.set_starred("raw-session-123", false)?;
+        assert!(!database.list_sessions()?[0].starred);
 
         Ok(())
     }

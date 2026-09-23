@@ -25,6 +25,12 @@ enum Command {
     /// Remove a saved session from Ark by its alias or native session ID.
     Rm { key: String },
 
+    /// Star a session by alias or native session ID.
+    Star { key: String },
+
+    /// Remove a session's star by alias or native session ID.
+    Unstar { key: String },
+
     /// list all saved sessions.
     List,
 }
@@ -42,6 +48,16 @@ impl Cli {
             (Some(Command::Rm { key }), None) => {
                 core::remove::remove_session(&key)?;
                 println!("Removed `{key}` from Ark.");
+            }
+
+            (Some(Command::Star { key }), None) => {
+                core::star::set_starred(&key, true)?;
+                println!("Starred `{key}`.");
+            }
+
+            (Some(Command::Unstar { key }), None) => {
+                core::star::set_starred(&key, false)?;
+                println!("Unstarred `{key}`.");
             }
 
             (Some(Command::List), None) | (None, None) => {
