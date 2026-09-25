@@ -37,6 +37,7 @@ pub struct SessionSummary {
 pub struct ResumeSession {
     pub session_id: String,
     pub provider: String,
+    pub cwd: PathBuf,
 }
 
 pub struct NewSession {
@@ -214,7 +215,7 @@ impl Database {
             .connection
             .query_row(
                 r#"
-                SELECT session_id, provider
+                SELECT session_id, provider, cwd
                 FROM sessions
                 WHERE id = ?1 OR session_id = ?1
                 ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END
@@ -225,6 +226,7 @@ impl Database {
                     Ok(ResumeSession {
                         session_id: row.get(0)?,
                         provider: row.get(1)?,
+                        cwd: PathBuf::from(row.get::<_, String>(2)?),
                     })
                 },
             )
@@ -396,6 +398,7 @@ mod tests {
         assert_eq!(by_alias.session_id, "raw-session-123");
         assert_eq!(by_native_id.session_id, "raw-session-123");
         assert_eq!(by_alias.provider, "codex");
+        assert_eq!(by_alias.cwd, PathBuf::from("/tmp/example-project"));
 
         Ok(())
     }

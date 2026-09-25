@@ -12,6 +12,7 @@ pub fn open_session(key: &str) -> Result<()> {
     }
 
     let mut command = provider.resume_command(&target.session_id);
+    command.current_dir(&target.cwd);
     let exit_status = command
         .status()
         .with_context(|| format!("could not launch provider `{}`", provider.name()))?;
