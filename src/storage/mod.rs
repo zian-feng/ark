@@ -50,6 +50,13 @@ pub struct NewSession {
     pub starred: bool,
 }
 
+pub struct SessionChanges {
+    pub alias: Option<String>,
+    pub description: Option<String>,
+    pub provider: Option<String>,
+    pub cwd: Option<PathBuf>,
+}
+
 pub struct Database {
     connection: Connection,
 }
@@ -186,6 +193,85 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_session(&mut self, key: &str, changes: SessionChanges) -> Result<()> {
+        if changes.alias.is_none()
+            && changes.description.is_none()
+            && changes.provider.is_none()
+            && changes.cwd.is_none()
+        {
+            anyhow::bail!("provide at least one field to update");
+        }
+
+        if changes.provider.is_some() != changes.cwd.is_some() {
+            anyhow::bail!("provider and cwd must be updated together");
+        }
+
+        if changes
+            .description
+            .as_deref()
+            .is_some_and(|description| description.chars().count() > MAX_DESCRIPTION_LENGTH)
+        {
+            anyhow::bail!("description must be at most {MAX_DESCRIPTION_LENGTH} characters");
+        }
+
+        let transaction = self.connection.transaction()?;
+        let rowid = transaction
+            .query_row(
+                r#"
+                SELECT rowid
+                FROM sessions
+                WHERE id = ?1 OR session_id = ?1
+                ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END
+                LIMIT 1
+                "#,
+                params![key],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .with_context(|| format!("no saved session with alias or ID `{key}`"))?;
+
+        if let Some(alias) = &changes.alias {
+            let alias_owner = transaction
+                .query_row(
+                    "SELECT rowid FROM sessions WHERE id = ?1",
+                    params![alias],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+
+            if alias_owner.is_some_and(|owner| owner != rowid) {
+                anyhow::bail!("alias `{alias}` is already used by another saved session");
+            }
+        }
+
+        let cwd = changes
+            .cwd
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+
+        transaction.execute(
+            r#"
+            UPDATE sessions
+            SET
+                id = COALESCE(?1, id),
+                description = COALESCE(?2, description),
+                provider = COALESCE(?3, provider),
+                cwd = COALESCE(?4, cwd)
+            WHERE rowid = ?5
+            "#,
+            params![
+                changes.alias.as_deref(),
+                changes.description.as_deref(),
+                changes.provider.as_deref(),
+                cwd.as_deref(),
+                rowid,
+            ],
+        )?;
+
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         let mut statement = self.connection.prepare(
             r#"
@@ -241,7 +327,7 @@ impl Database {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{Database, MAX_DESCRIPTION_LENGTH, NewSession};
+    use super::{Database, MAX_DESCRIPTION_LENGTH, NewSession, SessionChanges};
 
     #[test]
     fn opening_db_creates_session_table() -> anyhow::Result<()> {
@@ -302,6 +388,88 @@ mod tests {
             .expect_err("an overlong description should be rejected");
 
         assert!(error.to_string().contains("at most"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn updates_alias_description_provider_and_cwd_together() -> anyhow::Result<()> {
+        let temporary_directory = tempfile::tempdir()?;
+        let mut database = Database::open_at(temporary_directory.path().join("ark.db"))?;
+
+        database.add_session(NewSession {
+            id: "raw-session-123".to_owned(),
+            session_id: "raw-session-123".to_owned(),
+            provider: "codex".to_owned(),
+            cwd: PathBuf::from("/tmp/codex-project"),
+            description: Some("Old description".to_owned()),
+            tags: None,
+            starred: false,
+        })?;
+
+        database.update_session(
+            "raw-session-123",
+            SessionChanges {
+                alias: Some("auth-refactor".to_owned()),
+                description: Some("New description".to_owned()),
+                provider: Some("claude".to_owned()),
+                cwd: Some(PathBuf::from("/tmp/claude-project")),
+            },
+        )?;
+
+        let session = database.get_resume_session("auth-refactor")?;
+        let summary = database
+            .list_sessions()?
+            .pop()
+            .expect("session should exist");
+
+        assert_eq!(session.session_id, "raw-session-123");
+        assert_eq!(session.provider, "claude");
+        assert_eq!(session.cwd, PathBuf::from("/tmp/claude-project"));
+        assert_eq!(summary.id, "auth-refactor");
+        assert_eq!(summary.description, "New description");
+
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_an_alias_owned_by_another_session_without_changes() -> anyhow::Result<()> {
+        let temporary_directory = tempfile::tempdir()?;
+        let mut database = Database::open_at(temporary_directory.path().join("ark.db"))?;
+
+        for (id, session_id) in [
+            ("first-session", "raw-session-1"),
+            ("second-session", "raw-session-2"),
+        ] {
+            database.add_session(NewSession {
+                id: id.to_owned(),
+                session_id: session_id.to_owned(),
+                provider: "codex".to_owned(),
+                cwd: PathBuf::from("/tmp/example-project"),
+                description: None,
+                tags: None,
+                starred: false,
+            })?;
+        }
+
+        let error = database
+            .update_session(
+                "second-session",
+                SessionChanges {
+                    alias: Some("first-session".to_owned()),
+                    description: Some("Should not be saved".to_owned()),
+                    provider: None,
+                    cwd: None,
+                },
+            )
+            .expect_err("an existing alias should be rejected");
+
+        assert!(error.to_string().contains("already used"));
+        assert_eq!(
+            database.list_sessions()?[0].description,
+            "",
+            "the failed update must not change the target row"
+        );
 
         Ok(())
     }

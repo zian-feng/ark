@@ -41,7 +41,25 @@ enum Command {
     /// Remove a session's star by alias or native session ID.
     Unstar { key: String },
 
+    /// Update a saved session's metadata.
+    Update {
+        key: String,
+
+        /// New Ark alias for the session.
+        #[arg(long)]
+        alias: Option<String>,
+
+        /// New session description.
+        #[arg(long = "desc", visible_alias = "description")]
+        description: Option<String>,
+
+        /// Provider that owns the native session ID.
+        #[arg(long)]
+        provider: Option<String>,
+    },
+
     /// list all saved sessions.
+    #[command(visible_alias = "ls")]
     List,
 }
 
@@ -81,6 +99,24 @@ impl Cli {
             (Some(Command::Unstar { key }), None) => {
                 core::star::set_starred(&key, false)?;
                 println!("Unstarred `{key}`.");
+            }
+
+            (
+                Some(Command::Update {
+                    key,
+                    alias,
+                    description,
+                    provider,
+                }),
+                None,
+            ) => {
+                core::update::update_session(
+                    &key,
+                    alias.as_deref(),
+                    description.as_deref(),
+                    provider.as_deref(),
+                )?;
+                println!("Updated `{key}`.");
             }
 
             (Some(Command::List), None) | (None, None) => {
