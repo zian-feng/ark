@@ -7,7 +7,7 @@ const CREATE_SESSION_TABLE: &str = r#"
         session_id TEXT NOT NULL,
         provider TEXT NOT NULL,
         cwd TEXT NOT NULL,
-        description TEXT NOT NULL DEFAULT '',
+        description TEXT NOT NULL DEFAULT '' CHECK (length(description) <= 1000),
         tags TEXT NOT NULL DEFAULT '[]',
         starred INTEGER NOT NULL DEFAULT 0 CHECK (starred IN (0, 1)),
         created_at TEXT NOT NULL,

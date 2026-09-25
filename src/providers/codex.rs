@@ -39,11 +39,15 @@ impl Provider for CodexProvider {
             return Ok(None);
         };
 
-        let (metadata_id, cwd) = read_session_metadata(&file_path)?;
-        if metadata_id.as_deref().is_some_and(|id| id != session_id) {
+        let metadata = read_session_metadata(&file_path)?;
+        if metadata
+            .session_id
+            .as_deref()
+            .is_some_and(|id| id != session_id)
+        {
             return Ok(None);
         }
-        let Some(cwd) = cwd else {
+        let Some(cwd) = metadata.cwd else {
             return Ok(None);
         };
 
@@ -57,7 +61,7 @@ impl Provider for CodexProvider {
             provider: self.name(),
             cwd,
             modified_at: DateTime::<Utc>::from(modified),
-            preview: None,
+            preview: metadata.preview,
             file_path,
         }))
     }
@@ -99,28 +103,135 @@ fn find_rollout_file(root: &Path, session_id: &str) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
-fn read_session_metadata(path: &Path) -> Result<(Option<String>, Option<PathBuf>)> {
+struct SessionMetadata {
+    session_id: Option<String>,
+    cwd: Option<PathBuf>,
+    preview: Option<String>,
+}
+
+fn read_session_metadata(path: &Path) -> Result<SessionMetadata> {
     let file = File::open(path).with_context(|| format!("could not open {}", path.display()))?;
+    let mut session_id = None;
+    let mut cwd = None;
+    let mut first_user_message = None;
+    let mut preview = None;
 
     for line in BufReader::new(file).lines() {
         let value: Value = serde_json::from_str(&line?)?;
-        if value.get("type").and_then(Value::as_str) != Some("session_meta") {
-            continue;
+
+        if value.get("type").and_then(Value::as_str) == Some("session_meta") {
+            let payload = value.get("payload").unwrap_or(&Value::Null);
+            if session_id.is_none() {
+                session_id = payload
+                    .get("id")
+                    .or_else(|| payload.get("session_id"))
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+            }
+            if cwd.is_none() {
+                cwd = payload
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from);
+            }
         }
 
-        let payload = value.get("payload").unwrap_or(&Value::Null);
-        let session_id = payload
-            .get("id")
-            .or_else(|| payload.get("session_id"))
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
-        let cwd = payload
-            .get("cwd")
-            .and_then(Value::as_str)
-            .map(PathBuf::from);
+        if let Some(message) = user_message(&value) {
+            if first_user_message.is_none() {
+                first_user_message = Some(message.clone());
+            }
 
-        return Ok((session_id, cwd));
+            if preview.is_none() && !is_session_control_command(&message) {
+                preview = Some(message);
+            }
+        }
     }
 
-    Ok((None, None))
+    Ok(SessionMetadata {
+        session_id,
+        cwd,
+        preview: preview.or(first_user_message),
+    })
+}
+
+fn user_message(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return None;
+    }
+
+    let payload = value.get("payload")?;
+    if payload.get("type").and_then(Value::as_str) != Some("user_message") {
+        return None;
+    }
+
+    if payload
+        .get("kind")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind != "plain")
+    {
+        return None;
+    }
+
+    payload
+        .get("message")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn is_session_control_command(message: &str) -> bool {
+    matches!(
+        message.trim().split_whitespace().next(),
+        Some("/permissions" | "/model" | "/reasoning" | "/compact" | "/recap")
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::Path};
+
+    use super::read_session_metadata;
+
+    #[test]
+    fn skips_session_control_commands_when_choosing_a_preview() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let path = temporary_directory.path().join("session.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                r#"{"type":"session_meta","payload":{"session_id":"session-1","cwd":"/work/example"}}"#,
+                "\n",
+                r#"{"type":"event_msg","payload":{"type":"user_message","kind":"plain","message":"/permissions read-only"}}"#,
+                "\n",
+                r#"{"type":"event_msg","payload":{"type":"user_message","kind":"plain","message":"Add rate limiting"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let metadata = read_session_metadata(&path).unwrap();
+
+        assert_eq!(metadata.session_id.as_deref(), Some("session-1"));
+        assert_eq!(metadata.cwd.as_deref(), Some(Path::new("/work/example")));
+        assert_eq!(metadata.preview.as_deref(), Some("Add rate limiting"));
+    }
+
+    #[test]
+    fn uses_the_first_prompt_when_every_prompt_is_a_control_command() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let path = temporary_directory.path().join("session.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                r#"{"type":"event_msg","payload":{"type":"user_message","kind":"plain","message":"/permissions read-only"}}"#,
+                "\n",
+                r#"{"type":"event_msg","payload":{"type":"user_message","kind":"plain","message":"/model gpt-5"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let metadata = read_session_metadata(&path).unwrap();
+
+        assert_eq!(metadata.preview.as_deref(), Some("/permissions read-only"));
+    }
 }

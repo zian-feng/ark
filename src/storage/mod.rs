@@ -9,6 +9,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
+pub const MAX_DESCRIPTION_LENGTH: usize = 1_000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
     pub id: String,
@@ -95,6 +97,9 @@ impl Database {
         let created_at = Utc::now();
         let created_at_text = created_at.to_rfc3339();
         let description = new_session.description.unwrap_or_default();
+        if description.chars().count() > MAX_DESCRIPTION_LENGTH {
+            anyhow::bail!("description must be at most {MAX_DESCRIPTION_LENGTH} characters");
+        }
         let tags = new_session.tags.unwrap_or_default();
         let tags_json = serde_json::to_string(&tags)?;
         let cwd = new_session.cwd.to_string_lossy().into_owned();
@@ -234,7 +239,7 @@ impl Database {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{Database, NewSession};
+    use super::{Database, MAX_DESCRIPTION_LENGTH, NewSession};
 
     #[test]
     fn opening_db_creates_session_table() -> anyhow::Result<()> {
@@ -273,6 +278,28 @@ mod tests {
         assert_eq!(saved.provider, "codex");
         assert_eq!(saved.description, "");
         assert_eq!(saved.tags, Some(vec![]));
+
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_a_description_that_exceeds_the_storage_limit() -> anyhow::Result<()> {
+        let temporary_directory = tempfile::tempdir()?;
+        let database = Database::open_at(temporary_directory.path().join("ark.db"))?;
+
+        let error = database
+            .add_session(NewSession {
+                id: "auth-refactor".to_owned(),
+                session_id: "raw-session-123".to_owned(),
+                provider: "codex".to_owned(),
+                cwd: PathBuf::from("/tmp/example-project"),
+                description: Some("x".repeat(MAX_DESCRIPTION_LENGTH + 1)),
+                tags: None,
+                starred: false,
+            })
+            .expect_err("an overlong description should be rejected");
+
+        assert!(error.to_string().contains("at most"));
 
         Ok(())
     }
