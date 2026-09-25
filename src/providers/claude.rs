@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use super::{DiscoveredSession, Provider, SessionIdHint, binary_on_path};
+use super::{DiscoveredSession, Provider, SessionIdHint, binary_on_path, is_non_task_prompt};
 
 pub struct ClaudeProvider;
 
@@ -117,21 +117,22 @@ fn read_session_metadata(path: &Path, session_id: &str) -> Result<Option<Session
     let mut found_session_id = false;
     let mut cwd = None;
     let mut title = None;
+    let mut first_user_prompt = None;
+    let mut prompt_preview = None;
 
     for line in BufReader::new(file).lines() {
         let value: Value = serde_json::from_str(&line?)
             .with_context(|| format!("could not parse {}", path.display()))?;
 
-        if record_session_id(&value) == Some(session_id) {
+        let belongs_to_session = record_session_id(&value) == Some(session_id);
+        if belongs_to_session {
             found_session_id = true;
             if cwd.is_none() {
                 cwd = record_cwd(&value);
             }
         }
 
-        if value.get("type").and_then(Value::as_str) == Some("ai-title")
-            && record_session_id(&value) == Some(session_id)
-        {
+        if value.get("type").and_then(Value::as_str) == Some("ai-title") && belongs_to_session {
             if title.is_none() {
                 title = value
                     .get("aiTitle")
@@ -139,9 +140,23 @@ fn read_session_metadata(path: &Path, session_id: &str) -> Result<Option<Session
                     .map(ToOwned::to_owned);
             }
         }
+
+        if belongs_to_session {
+            if let Some(prompt) = user_prompt(&value) {
+                if first_user_prompt.is_none() {
+                    first_user_prompt = Some(prompt.clone());
+                }
+                if prompt_preview.is_none() && !is_non_task_prompt(&prompt) {
+                    prompt_preview = Some(prompt);
+                }
+            }
+        }
     }
 
-    Ok(found_session_id.then_some(SessionMetadata { cwd, title }))
+    Ok(found_session_id.then_some(SessionMetadata {
+        cwd,
+        title: title.or(prompt_preview.or(first_user_prompt)),
+    }))
 }
 
 fn record_session_id(value: &Value) -> Option<&str> {
@@ -157,6 +172,24 @@ fn record_cwd(value: &Value) -> Option<PathBuf> {
         .or_else(|| value.pointer("/payload/cwd"))
         .and_then(Value::as_str)
         .map(PathBuf::from)
+}
+
+fn user_prompt(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) != Some("user") {
+        return None;
+    }
+
+    let content = value.pointer("/message/content")?;
+    match content {
+        Value::String(text) => Some(text.to_owned()),
+        Value::Array(items) => items
+            .iter()
+            .find(|item| item.get("type").and_then(Value::as_str) == Some("text"))?
+            .get("text")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -191,5 +224,34 @@ mod tests {
         assert_eq!(session.provider, "claude");
         assert_eq!(session.cwd, std::path::Path::new("/work/example"));
         assert_eq!(session.preview.as_deref(), Some("Fix login flow"));
+    }
+
+    #[test]
+    fn uses_the_first_meaningful_user_prompt_without_an_ai_title() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let project = temporary_directory.path().join("projects/example");
+        fs::create_dir_all(&project).unwrap();
+
+        let session_id = "ffdf9b8d-61fe-4137-bdd0-2755c57796af";
+        fs::write(
+            project.join(format!("{session_id}.jsonl")),
+            format!(
+                "{{\"type\":\"user\",\"sessionId\":\"{session_id}\",\"cwd\":\"/work/example\",\"message\":{{\"content\":\"<system-reminder>metadata</system-reminder>\"}}}}\n{{\"type\":\"user\",\"sessionId\":\"{session_id}\",\"message\":{{\"content\":\"Implement Claude descriptions\"}}}}\n"
+            ),
+        )
+        .unwrap();
+
+        let session = find_session_in_projects(
+            &temporary_directory.path().join("projects"),
+            session_id,
+            "claude",
+        )
+        .unwrap()
+        .expect("session should be found");
+
+        assert_eq!(
+            session.preview.as_deref(),
+            Some("Implement Claude descriptions")
+        );
     }
 }

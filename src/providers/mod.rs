@@ -125,6 +125,46 @@ pub(crate) fn binary_on_path(binary: &str) -> bool {
     })
 }
 
+pub(crate) fn is_non_task_prompt(message: &str) -> bool {
+    let message = message.trim_start();
+
+    if matches!(
+        message.split_whitespace().next(),
+        Some("/permissions" | "/model" | "/reasoning" | "/compact" | "/recap")
+    ) {
+        return true;
+    }
+
+    let normalized = message.trim();
+    if normalized.is_empty()
+        || normalized
+            .chars()
+            .all(|character| character.is_ascii_punctuation())
+    {
+        return true;
+    }
+
+    if matches!(
+        normalized.to_ascii_lowercase().as_str(),
+        "ok" | "okay" | "yes" | "no" | "continue" | "go" | "thanks"
+    ) {
+        return true;
+    }
+
+    [
+        "<environment_context>",
+        "<permissions instructions>",
+        "<skills_instructions>",
+        "<system-reminder>",
+        "<local-command-",
+        "<command-",
+        "<task-notification>",
+        "<teammate-message>",
+    ]
+    .iter()
+    .any(|prefix| message.starts_with(prefix))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{SessionIdHint, get_provider, session_id_hint};

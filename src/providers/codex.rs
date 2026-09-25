@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use super::{DiscoveredSession, Provider, SessionIdHint, binary_on_path};
+use super::{DiscoveredSession, Provider, SessionIdHint, binary_on_path, is_non_task_prompt};
 
 pub struct CodexProvider;
 
@@ -141,7 +141,7 @@ fn read_session_metadata(path: &Path) -> Result<SessionMetadata> {
                 first_user_message = Some(message.clone());
             }
 
-            if preview.is_none() && !is_session_control_command(&message) {
+            if preview.is_none() && !is_non_task_prompt(&message) {
                 preview = Some(message);
             }
         }
@@ -155,34 +155,40 @@ fn read_session_metadata(path: &Path) -> Result<SessionMetadata> {
 }
 
 fn user_message(value: &Value) -> Option<String> {
-    if value.get("type").and_then(Value::as_str) != Some("event_msg") {
-        return None;
-    }
-
     let payload = value.get("payload")?;
-    if payload.get("type").and_then(Value::as_str) != Some("user_message") {
-        return None;
+
+    match value.get("type").and_then(Value::as_str) {
+        Some("event_msg")
+            if payload.get("type").and_then(Value::as_str) == Some("user_message") =>
+        {
+            if payload
+                .get("kind")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind != "plain")
+            {
+                return None;
+            }
+
+            payload
+                .get("message")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        }
+        Some("response_item")
+            if payload.get("type").and_then(Value::as_str) == Some("message")
+                && payload.get("role").and_then(Value::as_str) == Some("user") =>
+        {
+            payload
+                .get("content")
+                .and_then(Value::as_array)?
+                .iter()
+                .find(|item| item.get("type").and_then(Value::as_str) == Some("input_text"))?
+                .get("text")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        }
+        _ => None,
     }
-
-    if payload
-        .get("kind")
-        .and_then(Value::as_str)
-        .is_some_and(|kind| kind != "plain")
-    {
-        return None;
-    }
-
-    payload
-        .get("message")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-}
-
-fn is_session_control_command(message: &str) -> bool {
-    matches!(
-        message.trim().split_whitespace().next(),
-        Some("/permissions" | "/model" | "/reasoning" | "/compact" | "/recap")
-    )
 }
 
 #[cfg(test)]
@@ -233,5 +239,32 @@ mod tests {
         let metadata = read_session_metadata(&path).unwrap();
 
         assert_eq!(metadata.preview.as_deref(), Some("/permissions read-only"));
+    }
+
+    #[test]
+    fn reads_user_prompts_from_response_items() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let path = temporary_directory.path().join("session.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"/permissions read-only"}]}}"#,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context> <cwd>/work/example</cwd> </environment_context>"}]}}"#,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"."}]}}"#,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Implement automatic descriptions"}]}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let metadata = read_session_metadata(&path).unwrap();
+
+        assert_eq!(
+            metadata.preview.as_deref(),
+            Some("Implement automatic descriptions")
+        );
     }
 }
