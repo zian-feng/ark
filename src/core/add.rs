@@ -16,12 +16,38 @@ pub fn add_new_session(
         Some(provider_name) => {
             let provider = providers::get_provider(provider_name)
                 .with_context(|| format!("unknown provider `{provider_name}`"))?;
-            let session = provider.find_session_by_id(session_id)?.with_context(|| {
-                format!(
-                    "provider `{}` could not find session ID `{session_id}`",
-                    provider.name()
-                )
-            })?;
+
+            let session = match provider.find_session_by_id(session_id)? {
+                Some(session) => session,
+                None => {
+                    let matches =
+                        providers::find_session_in_other_providers(session_id, provider.name())?;
+
+                    match matches.as_slice() {
+                        [session] => bail!(
+                            "session ID `{session_id}` was not found in provider `{}`, but it was found in `{}`; retry with `--provider {}` or omit --provider to auto-detect it",
+                            provider.name(),
+                            session.provider,
+                            session.provider,
+                        ),
+                        [] => bail!(
+                            "provider `{}` could not find session ID `{session_id}`",
+                            provider.name()
+                        ),
+                        sessions => {
+                            let names = sessions
+                                .iter()
+                                .map(|session| session.provider)
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            bail!(
+                                "session ID `{session_id}` was not found in provider `{}`, but it was found in multiple other providers ({names}); choose one with --provider",
+                                provider.name()
+                            )
+                        }
+                    }
+                }
+            };
 
             session
         }

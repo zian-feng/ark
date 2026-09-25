@@ -76,6 +76,29 @@ pub fn auto_detect_provider(session_id: &str) -> Result<DiscoveredSession> {
     }
 }
 
+/// Finds sessions owned by providers other than the one the user explicitly selected.
+/// This is used only to produce a useful correction when `--provider` is wrong.
+pub fn find_session_in_other_providers(
+    session_id: &str,
+    excluded_provider: &str,
+) -> Result<Vec<DiscoveredSession>> {
+    let hint = session_id_hint(session_id);
+    let mut providers = all_providers()
+        .into_iter()
+        .filter(|provider| provider.name() != excluded_provider)
+        .collect::<Vec<_>>();
+    providers.sort_by_key(|provider| provider.id_hint_priority(hint));
+
+    let mut matches = Vec::new();
+    for provider in providers {
+        if let Some(session) = provider.find_session_by_id(session_id)? {
+            matches.push(session);
+        }
+    }
+
+    Ok(matches)
+}
+
 pub fn session_id_hint(session_id: &str) -> SessionIdHint {
     let bytes = session_id.as_bytes();
 
