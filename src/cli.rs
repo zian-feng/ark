@@ -20,6 +20,10 @@ enum Command {
     Add {
         session_id: String,
         alias: Option<String>,
+
+        /// Provider that owns the native session ID.
+        #[arg(long)]
+        provider: Option<String>,
     },
 
     /// Remove a saved session from Ark by its alias or native session ID.
@@ -40,8 +44,16 @@ impl Cli {
         let Cli { command, alias } = self;
 
         match (command, alias) {
-            (Some(Command::Add { session_id, alias }), None) => {
-                let session = core::add::add_new_session_codex(&session_id, alias.as_deref())?;
+            (
+                Some(Command::Add {
+                    session_id,
+                    alias,
+                    provider,
+                }),
+                None,
+            ) => {
+                let session =
+                    core::add::add_new_session(&session_id, alias.as_deref(), provider.as_deref())?;
                 println!("Added `{}` ({} session)", session.id, session.provider);
             }
 
