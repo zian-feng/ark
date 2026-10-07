@@ -64,10 +64,7 @@ pub struct Database {
 impl Database {
     /// opens persistent database at ~/.ark/ark.db
     pub fn open() -> Result<Self> {
-        let home = dirs::home_dir().context("could not determine the home directory")?;
-        let database_path = home.join(".ark").join("ark.db");
-
-        Self::open_at(database_path)
+        Self::open_at(Self::path_for_current_user()?)
     }
 
     /// open a db from an explicit path for testing
@@ -146,6 +143,37 @@ impl Database {
             created_at,
             last_opened_at: None,
         })
+    }
+
+    /// Returns Ark's alias for an already-saved provider session.
+    ///
+    /// A native session ID is only unique within its provider, so both values
+    /// are used for this lookup.
+    pub fn find_alias_by_provider_session_id(
+        &self,
+        provider: &str,
+        session_id: &str,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT id FROM sessions WHERE provider = ?1 AND session_id = ?2",
+                params![provider, session_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Returns the native session ID currently using an Ark alias.
+    pub fn find_session_id_by_alias(&self, alias: &str) -> Result<Option<String>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT session_id FROM sessions WHERE id = ?1",
+                params![alias],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
 
     pub fn remove_session(&self, key: &str) -> Result<()> {
@@ -366,6 +394,37 @@ mod tests {
         assert_eq!(saved.provider, "codex");
         assert_eq!(saved.description, "");
         assert_eq!(saved.tags, Some(vec![]));
+
+        Ok(())
+    }
+
+    #[test]
+    fn finds_existing_sessions_by_provider_id_and_alias() -> anyhow::Result<()> {
+        let temporary_directory = tempfile::tempdir()?;
+        let database = Database::open_at(temporary_directory.path().join("ark.db"))?;
+
+        database.add_session(NewSession {
+            id: "auth-refactor".to_owned(),
+            session_id: "raw-session-123".to_owned(),
+            provider: "codex".to_owned(),
+            cwd: PathBuf::from("/tmp/example-project"),
+            description: None,
+            tags: None,
+            starred: false,
+        })?;
+
+        assert_eq!(
+            database.find_alias_by_provider_session_id("codex", "raw-session-123")?,
+            Some("auth-refactor".to_owned())
+        );
+        assert_eq!(
+            database.find_session_id_by_alias("auth-refactor")?,
+            Some("raw-session-123".to_owned())
+        );
+        assert_eq!(
+            database.find_alias_by_provider_session_id("claude", "raw-session-123")?,
+            None
+        );
 
         Ok(())
     }

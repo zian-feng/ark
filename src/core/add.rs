@@ -82,6 +82,28 @@ pub fn add_new_session(
         None => session_id.to_owned(),
     };
 
+    if let Some(existing_alias) =
+        database.find_alias_by_provider_session_id(provider.name(), session_id)?
+    {
+        if existing_alias == session_id {
+            bail!(
+                "{} session `{session_id}` is already saved; open it with `ark {session_id}`",
+                provider.name()
+            );
+        }
+
+        bail!(
+            "{} session `{session_id}` is already saved as `{existing_alias}`; open it with `ark {existing_alias}` or `ark {session_id}`",
+            provider.name()
+        );
+    }
+
+    if let Some(existing_session_id) = database.find_session_id_by_alias(&id)? {
+        bail!(
+            "alias `{id}` is already used by session `{existing_session_id}`; choose another alias"
+        );
+    }
+
     database.add_session(NewSession {
         id,
         session_id: session_id.to_owned(),

@@ -6,6 +6,7 @@ mod core;
 mod providers;
 mod slug;
 mod storage;
+mod tui;
 
 fn main() -> Result<()> {
     cli::Cli::parse().run()

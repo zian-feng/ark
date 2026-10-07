@@ -1,7 +1,8 @@
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
+use std::io::IsTerminal;
 
-use crate::core;
+use crate::{core, tui};
 
 const DESCRIPTION_DISPLAY_LENGTH: usize = 80;
 
@@ -119,33 +120,18 @@ impl Cli {
                 println!("Updated `{key}`.");
             }
 
-            (Some(Command::List), None) | (None, None) => {
-                let sessions = core::list::list_sessions()?;
+            (Some(Command::List), None) => {
+                print_list()?;
+            }
 
-                if sessions.is_empty() {
-                    println!("No saved sessions.");
-                    return Ok(());
+            (None, None) if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
+                if let Some(key) = tui::run()? {
+                    core::open::open_session(&key)?;
                 }
+            }
 
-                println!(
-                    "     {:<25}  {:<38}  {:<10}  DESCRIPTION",
-                    "ALIAS", "SESSION ID", "PROVIDER"
-                );
-
-                for session in sessions {
-                    let starred = if session.starred { "  *  " } else { "     " };
-                    let alias = if session.id == session.session_id {
-                        ""
-                    } else {
-                        &session.id
-                    };
-                    let description = truncate_description_for_display(&session.description);
-
-                    println!(
-                        "{}{:<25}  {:<38}  {:<10}  {}",
-                        starred, alias, session.session_id, session.provider, description
-                    );
-                }
+            (None, None) => {
+                print_list()?;
             }
 
             (None, Some(alias)) => {
@@ -159,6 +145,37 @@ impl Cli {
 
         Ok(())
     }
+}
+
+fn print_list() -> Result<()> {
+    let sessions = core::list::list_sessions()?;
+
+    if sessions.is_empty() {
+        println!("No saved sessions.");
+        return Ok(());
+    }
+
+    println!(
+        "     {:<25}  {:<38}  {:<10}  DESCRIPTION",
+        "ALIAS", "SESSION ID", "PROVIDER"
+    );
+
+    for session in sessions {
+        let starred = if session.starred { "  *  " } else { "     " };
+        let alias = if session.id == session.session_id {
+            ""
+        } else {
+            &session.id
+        };
+        let description = truncate_description_for_display(&session.description);
+
+        println!(
+            "{}{:<25}  {:<38}  {:<10}  {}",
+            starred, alias, session.session_id, session.provider, description
+        );
+    }
+
+    Ok(())
 }
 
 fn truncate_description_for_display(description: &str) -> String {
