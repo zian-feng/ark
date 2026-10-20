@@ -1,5 +1,5 @@
 use crate::{
-    providers,
+    providers::{self, DiscoveredSession},
     slug::slugify,
     storage::{Database, MAX_DESCRIPTION_LENGTH, NewSession, Session},
 };
@@ -113,6 +113,60 @@ pub fn add_new_session(
         tags: None,
         starred: false,
     })
+}
+
+/// Adds a provider session found by Ark itself. Existing sessions are skipped so
+/// shell hooks can safely run after every provider command.
+pub fn add_discovered_session(discovered: DiscoveredSession) -> Result<Option<Session>> {
+    let database = Database::open()?;
+
+    if database
+        .find_alias_by_provider_session_id(discovered.provider, &discovered.session_id)?
+        .is_some()
+    {
+        return Ok(None);
+    }
+
+    let description = choose_description(
+        None,
+        discovered.preview.as_deref(),
+        discovered.provider,
+        &discovered.session_id,
+    )?;
+    let base_id = slugify(&description);
+    let base_id = if base_id.is_empty() {
+        discovered.session_id.clone()
+    } else {
+        base_id
+    };
+    let id = next_available_alias(&database, &base_id)?;
+
+    database
+        .add_session(NewSession {
+            id,
+            session_id: discovered.session_id,
+            provider: discovered.provider.to_owned(),
+            cwd: discovered.cwd,
+            description: Some(description),
+            tags: None,
+            starred: false,
+        })
+        .map(Some)
+}
+
+fn next_available_alias(database: &Database, base_id: &str) -> Result<String> {
+    if database.find_session_id_by_alias(base_id)?.is_none() {
+        return Ok(base_id.to_owned());
+    }
+
+    for number in 2.. {
+        let candidate = format!("{base_id}-{number}");
+        if database.find_session_id_by_alias(&candidate)?.is_none() {
+            return Ok(candidate);
+        }
+    }
+
+    unreachable!("an unbounded integer range always produces a value")
 }
 
 fn choose_description(

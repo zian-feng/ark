@@ -4,6 +4,11 @@ use crate::{
     storage::{Database, SessionChanges},
 };
 
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
 use anyhow::{Context, Result, bail};
 
 pub fn update_session(
@@ -11,9 +16,13 @@ pub fn update_session(
     alias: Option<&str>,
     description: Option<&str>,
     provider_name: Option<&str>,
+    cwd: Option<&Path>,
 ) -> Result<()> {
-    if alias.is_none() && description.is_none() && provider_name.is_none() {
+    if alias.is_none() && description.is_none() && provider_name.is_none() && cwd.is_none() {
         bail!("provide at least one field to update");
+    }
+    if provider_name.is_some() && cwd.is_some() {
+        bail!("use either `--provider` or `--cwd`, not both");
     }
 
     let mut database = Database::open()?;
@@ -50,7 +59,10 @@ pub fn update_session(
 
             (Some(discovered.provider.to_owned()), Some(discovered.cwd))
         }
-        None => (None, None),
+        None => match cwd {
+            Some(cwd) => (Some(target.provider), Some(normalize_directory(cwd)?)),
+            None => (None, None),
+        },
     };
 
     database.update_session(
@@ -62,4 +74,32 @@ pub fn update_session(
             cwd,
         },
     )
+}
+
+fn normalize_directory(path: &Path) -> Result<PathBuf> {
+    if !path.is_dir() {
+        bail!(
+            "working directory does not exist or is not a directory: {}",
+            path.display()
+        );
+    }
+    fs::canonicalize(path)
+        .with_context(|| format!("could not resolve working directory: {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_directory;
+
+    #[test]
+    fn normalizes_an_existing_directory_and_rejects_a_file() -> anyhow::Result<()> {
+        let temporary_directory = tempfile::tempdir()?;
+        let resolved = normalize_directory(temporary_directory.path())?;
+        assert!(resolved.is_absolute());
+
+        let file = temporary_directory.path().join("not-a-directory");
+        std::fs::write(&file, "test")?;
+        assert!(normalize_directory(&file).is_err());
+        Ok(())
+    }
 }

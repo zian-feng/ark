@@ -1,8 +1,8 @@
 use anyhow::{Result, bail};
-use clap::{Parser, Subcommand};
-use std::io::IsTerminal;
+use clap::{Parser, Subcommand, ValueEnum};
+use std::{io::IsTerminal, path::PathBuf};
 
-use crate::{core, tui};
+use crate::{config::Config, core, hooks, tui};
 
 const DESCRIPTION_DISPLAY_LENGTH: usize = 80;
 
@@ -42,6 +42,15 @@ enum Command {
     /// Remove a session's star by alias or native session ID.
     Unstar { key: String },
 
+    /// Start a new provider session with context from a saved session.
+    Fwd {
+        /// Source Ark alias or native session ID.
+        key: String,
+
+        /// Provider for the new session, such as `claude` or `codex`.
+        target_provider: String,
+    },
+
     /// Update a saved session's metadata.
     Update {
         key: String,
@@ -57,11 +66,64 @@ enum Command {
         /// Provider that owns the native session ID.
         #[arg(long)]
         provider: Option<String>,
+
+        /// New working directory for the session, for example after moving a repository.
+        #[arg(long)]
+        cwd: Option<PathBuf>,
     },
 
     /// list all saved sessions.
     #[command(visible_alias = "ls")]
     List,
+
+    /// Configure automatic saving after an interactive provider session ends.
+    Auto {
+        #[arg(value_enum)]
+        mode: Option<AutoMode>,
+
+        /// Ask before saving each detected session (requires `on`).
+        #[arg(long)]
+        confirm: bool,
+    },
+
+    /// Print shell integration code.
+    Init {
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+
+    #[command(hide = true)]
+    Hook {
+        #[command(subcommand)]
+        command: HookCommand,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum AutoMode {
+    On,
+    Off,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Shell {
+    Zsh,
+}
+
+#[derive(Subcommand)]
+enum HookCommand {
+    Pre {
+        #[arg(long)]
+        provider: String,
+        #[arg(long)]
+        cwd: PathBuf,
+        #[arg(long)]
+        pid: u32,
+    },
+    Post {
+        #[arg(long)]
+        pid: u32,
+    },
 }
 
 impl Cli {
@@ -103,11 +165,28 @@ impl Cli {
             }
 
             (
+                Some(Command::Fwd {
+                    key,
+                    target_provider,
+                }),
+                None,
+            ) => match core::forward::forward_session(&key, &target_provider)? {
+                Some(session) => println!(
+                    "Ark: forwarded `{key}` to {} as `{}`.",
+                    session.provider, session.id
+                ),
+                None => println!(
+                    "Ark: forwarded `{key}` to `{target_provider}`, but could not locate its new session afterward."
+                ),
+            },
+
+            (
                 Some(Command::Update {
                     key,
                     alias,
                     description,
                     provider,
+                    cwd,
                 }),
                 None,
             ) => {
@@ -116,12 +195,37 @@ impl Cli {
                     alias.as_deref(),
                     description.as_deref(),
                     provider.as_deref(),
+                    cwd.as_deref(),
                 )?;
                 println!("Updated `{key}`.");
             }
 
             (Some(Command::List), None) => {
                 print_list()?;
+            }
+
+            (Some(Command::Auto { mode, confirm }), None) => {
+                configure_auto(mode, confirm)?;
+            }
+
+            (Some(Command::Init { shell: Shell::Zsh }), None) => {
+                print!("{}", hooks::zsh::script());
+            }
+
+            (
+                Some(Command::Hook {
+                    command: HookCommand::Pre { provider, cwd, pid },
+                }),
+                None,
+            ) => hooks::pre(&provider, cwd, pid)?,
+
+            (
+                Some(Command::Hook {
+                    command: HookCommand::Post { pid },
+                }),
+                None,
+            ) => {
+                hooks::post(pid)?;
             }
 
             (None, None) if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
@@ -145,6 +249,44 @@ impl Cli {
 
         Ok(())
     }
+}
+
+fn configure_auto(mode: Option<AutoMode>, confirm: bool) -> Result<()> {
+    let mut config = Config::load()?;
+    match mode {
+        Some(AutoMode::On) => {
+            config.auto_mode = true;
+            config.auto_confirm = confirm;
+            config.save()?;
+            println!(
+                "Ark auto mode is on{}. Add `eval \"$(ark init zsh)\"` to ~/.zshrc if you have not installed the hook.",
+                if confirm {
+                    " (confirmation required)"
+                } else {
+                    ""
+                }
+            );
+        }
+        Some(AutoMode::Off) => {
+            if confirm {
+                bail!("`--confirm` can only be used with `ark auto on`");
+            }
+            config.auto_mode = false;
+            config.auto_confirm = false;
+            config.save()?;
+            println!("Ark auto mode is off.");
+        }
+        None => println!(
+            "Ark auto mode is {}{}.",
+            if config.auto_mode { "on" } else { "off" },
+            if config.auto_mode && config.auto_confirm {
+                " (confirmation required)"
+            } else {
+                ""
+            }
+        ),
+    }
+    Ok(())
 }
 
 fn print_list() -> Result<()> {

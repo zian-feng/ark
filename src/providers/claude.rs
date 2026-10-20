@@ -11,7 +11,9 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use super::{DiscoveredSession, Provider, SessionIdHint, binary_on_path, is_non_task_prompt};
+use super::{
+    DiscoveredSession, HandoffContext, Provider, SessionIdHint, binary_on_path, is_non_task_prompt,
+};
 
 pub struct ClaudeProvider;
 
@@ -36,9 +38,36 @@ impl Provider for ClaudeProvider {
         find_session_in_projects(&root, session_id, self.name())
     }
 
+    fn find_recent_session(
+        &self,
+        cwd: &Path,
+        started_at: DateTime<Utc>,
+    ) -> Result<Option<DiscoveredSession>> {
+        find_recent_session_in_projects(
+            &claude_data_dir()?.join("projects"),
+            cwd,
+            started_at,
+            self.name(),
+        )
+    }
+
+    fn extract_handoff(&self, session_id: &str) -> Result<Option<HandoffContext>> {
+        let root = claude_data_dir()?.join("projects");
+        let Some(path) = find_session_file(&root, session_id)? else {
+            return Ok(None);
+        };
+        read_handoff_context(&path, session_id)
+    }
+
     fn resume_command(&self, session_id: &str) -> Command {
         let mut command = Command::new("claude");
         command.arg("--resume").arg(session_id);
+        command
+    }
+
+    fn new_session_command(&self, initial_prompt: &str) -> Command {
+        let mut command = Command::new("claude");
+        command.arg(initial_prompt);
         command
     }
 }
@@ -99,12 +128,93 @@ fn find_session_in_projects(
                 cwd,
                 modified_at: DateTime::<Utc>::from(modified),
                 preview: metadata.title,
-                file_path: path,
             }));
         }
     }
 
     Ok(None)
+}
+
+fn find_session_file(projects_root: &Path, session_id: &str) -> Result<Option<PathBuf>> {
+    if !projects_root.exists() {
+        return Ok(None);
+    }
+
+    let target_name = format!("{session_id}.jsonl");
+    let mut directories = vec![projects_root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory)
+            .with_context(|| format!("could not read {}", directory.display()))?
+        {
+            let path = entry?.path();
+            if path.is_dir() {
+                directories.push(path);
+            } else if path.file_name().and_then(|name| name.to_str()) == Some(&target_name) {
+                return Ok(Some(path));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn find_recent_session_in_projects(
+    projects_root: &Path,
+    cwd: &Path,
+    started_at: DateTime<Utc>,
+    provider: &'static str,
+) -> Result<Option<DiscoveredSession>> {
+    if !projects_root.exists() {
+        return Ok(None);
+    }
+
+    let mut newest = None;
+    let mut directories = vec![projects_root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory)
+            .with_context(|| format!("could not read {}", directory.display()))?
+        {
+            let path = entry?.path();
+            if path.is_dir() {
+                directories.push(path);
+                continue;
+            }
+            let Some(session_id) = path.file_stem().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let modified = fs::metadata(&path)?
+                .modified()
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            let modified_at = DateTime::<Utc>::from(modified);
+            if modified_at <= started_at {
+                continue;
+            }
+            let Some(metadata) = read_session_metadata(&path, session_id)? else {
+                continue;
+            };
+            let Some(session_cwd) = metadata.cwd else {
+                continue;
+            };
+            if session_cwd != cwd {
+                continue;
+            }
+            let session = DiscoveredSession {
+                session_id: session_id.to_owned(),
+                provider,
+                cwd: session_cwd,
+                modified_at,
+                preview: metadata.title,
+            };
+            if newest.as_ref().is_none_or(|existing: &DiscoveredSession| {
+                session.modified_at > existing.modified_at
+            }) {
+                newest = Some(session);
+            }
+        }
+    }
+    Ok(newest)
 }
 
 struct SessionMetadata {
@@ -159,6 +269,47 @@ fn read_session_metadata(path: &Path, session_id: &str) -> Result<Option<Session
     }))
 }
 
+fn read_handoff_context(path: &Path, session_id: &str) -> Result<Option<HandoffContext>> {
+    let Some(metadata) = read_session_metadata(path, session_id)? else {
+        return Ok(None);
+    };
+    if metadata.cwd.is_none() {
+        return Ok(None);
+    }
+
+    let file = File::open(path).with_context(|| format!("could not open {}", path.display()))?;
+    let mut summary = None;
+    let mut requests = Vec::new();
+    for line in BufReader::new(file).lines() {
+        let value: Value = serde_json::from_str(&line?)
+            .with_context(|| format!("could not parse {}", path.display()))?;
+        let belongs_to_session = record_session_id(&value) == Some(session_id);
+        let is_file_local_summary = value.get("type").and_then(Value::as_str) == Some("summary")
+            && record_session_id(&value).is_none();
+        if value.get("type").and_then(Value::as_str) == Some("summary")
+            && (belongs_to_session || is_file_local_summary)
+        {
+            if let Some(value) = value.get("summary").and_then(Value::as_str) {
+                summary = Some(value.to_owned());
+            }
+        }
+        if belongs_to_session
+            && let Some(prompt) = user_prompt(&value).filter(|prompt| !is_non_task_prompt(prompt))
+        {
+            if requests.last() != Some(&prompt) {
+                requests.push(prompt);
+            }
+        }
+    }
+
+    let recent_user_requests = requests.into_iter().rev().take(4).collect::<Vec<_>>();
+    Ok(Some(HandoffContext {
+        title: metadata.title,
+        summary,
+        recent_user_requests: recent_user_requests.into_iter().rev().collect(),
+    }))
+}
+
 fn record_session_id(value: &Value) -> Option<&str> {
     value
         .get("sessionId")
@@ -196,7 +347,9 @@ fn user_prompt(value: &Value) -> Option<String> {
 mod tests {
     use std::fs;
 
-    use super::find_session_in_projects;
+    use chrono::{Duration, Utc};
+
+    use super::{find_recent_session_in_projects, find_session_in_projects, read_handoff_context};
 
     #[test]
     fn finds_and_validates_a_claude_session_file() {
@@ -252,6 +405,67 @@ mod tests {
         assert_eq!(
             session.preview.as_deref(),
             Some("Implement Claude descriptions")
+        );
+    }
+
+    #[test]
+    fn finds_a_recent_session_for_a_directory() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let project = temporary_directory.path().join("projects/example");
+        fs::create_dir_all(&project).unwrap();
+        let session_id = "ffdf9b8d-61fe-4137-bdd0-2755c57796af";
+        fs::write(
+            project.join(format!("{session_id}.jsonl")),
+            format!(
+                "{{\"type\":\"user\",\"sessionId\":\"{session_id}\",\"cwd\":\"/work/example\"}}\n"
+            ),
+        )
+        .unwrap();
+
+        let found = find_recent_session_in_projects(
+            &temporary_directory.path().join("projects"),
+            std::path::Path::new("/work/example"),
+            Utc::now() - Duration::seconds(1),
+            "claude",
+        )
+        .unwrap()
+        .expect("recent session should be found");
+
+        assert_eq!(found.session_id, session_id);
+        assert_eq!(found.provider, "claude");
+    }
+
+    #[test]
+    fn extracts_title_summary_and_recent_requests_for_a_handoff() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let path = temporary_directory.path().join("session.jsonl");
+        let session_id = "ffdf9b8d-61fe-4137-bdd0-2755c57796af";
+        fs::write(
+            &path,
+            format!(
+                concat!(
+                    "{{\"type\":\"user\",\"sessionId\":\"{session_id}\",\"cwd\":\"/work/example\",\"message\":{{\"content\":\"First request\"}}}}\n",
+                    "{{\"type\":\"ai-title\",\"sessionId\":\"{session_id}\",\"aiTitle\":\"Fix login flow\"}}\n",
+                    "{{\"type\":\"summary\",\"summary\":\"Login work is half complete.\"}}\n",
+                    "{{\"type\":\"user\",\"sessionId\":\"{session_id}\",\"message\":{{\"content\":\"Add regression tests\"}}}}\n"
+                ),
+                session_id = session_id,
+            ),
+        )
+        .unwrap();
+
+        let handoff = read_handoff_context(&path, session_id)
+            .unwrap()
+            .expect("handoff should be available");
+
+        assert_eq!(handoff.title.as_deref(), Some("Fix login flow"));
+        assert_eq!(
+            handoff.summary.as_deref(),
+            Some("Login work is half complete.")
+        );
+        assert_eq!(
+            handoff.recent_user_requests,
+            ["First request", "Add regression tests"]
         );
     }
 }

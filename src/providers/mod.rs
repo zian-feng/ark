@@ -1,7 +1,11 @@
 mod claude;
 mod codex;
 
-use std::{env, path::PathBuf, process::Command};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
@@ -20,7 +24,15 @@ pub struct DiscoveredSession {
     pub cwd: PathBuf,
     pub modified_at: DateTime<Utc>,
     pub preview: Option<String>,
-    pub file_path: PathBuf,
+}
+
+/// Local, deterministic context suitable for one initial prompt in another
+/// provider. Ark never sends this anywhere itself.
+#[derive(Debug, Clone)]
+pub struct HandoffContext {
+    pub title: Option<String>,
+    pub summary: Option<String>,
+    pub recent_user_requests: Vec<String>,
 }
 
 pub trait Provider {
@@ -28,7 +40,14 @@ pub trait Provider {
     fn is_available(&self) -> bool;
     fn id_hint_priority(&self, hint: SessionIdHint) -> u8;
     fn find_session_by_id(&self, session_id: &str) -> Result<Option<DiscoveredSession>>;
+    fn find_recent_session(
+        &self,
+        cwd: &Path,
+        started_at: DateTime<Utc>,
+    ) -> Result<Option<DiscoveredSession>>;
+    fn extract_handoff(&self, session_id: &str) -> Result<Option<HandoffContext>>;
     fn resume_command(&self, session_id: &str) -> Command;
+    fn new_session_command(&self, initial_prompt: &str) -> Command;
 }
 
 static CLAUDE: claude::ClaudeProvider = claude::ClaudeProvider;
