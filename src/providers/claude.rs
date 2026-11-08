@@ -59,6 +59,57 @@ impl Provider for ClaudeProvider {
         read_handoff_context(&path, session_id)
     }
 
+    fn auto_session_files(
+        &self,
+        cwd: &Path,
+        _start: DateTime<Utc>,
+        _end: DateTime<Utc>,
+    ) -> Result<Vec<PathBuf>> {
+        project_files(&claude_data_dir()?.join("projects"), cwd)
+    }
+
+    fn read_auto_session(&self, path: &Path) -> Result<Option<super::discovery::AutoSession>> {
+        let Some(id) = path.file_stem().and_then(|name| name.to_str()) else {
+            return Ok(None);
+        };
+        let records = super::discovery::records(path)?;
+        let mut cwd = None;
+        let mut created_at = None;
+        let mut preview = None;
+        for record in &records {
+            if record_session_id(record) != Some(id) {
+                continue;
+            }
+            if record["isSidechain"].as_bool() == Some(true) {
+                return Ok(None);
+            }
+            if cwd.is_none() {
+                cwd = record_cwd(record);
+            }
+            if created_at.is_none()
+                && let Some(timestamp) = record["timestamp"].as_str()
+            {
+                created_at = Some(DateTime::parse_from_rfc3339(timestamp)?.with_timezone(&Utc));
+            }
+            if record["type"] == "ai-title"
+                && let Some(title) = record["aiTitle"].as_str()
+            {
+                preview = Some(title.to_owned());
+            } else if preview.is_none() {
+                preview = user_prompt(record).filter(|text| !is_non_task_prompt(text));
+            }
+        }
+        let (Some(cwd), Some(created_at)) = (cwd, created_at) else {
+            return Ok(None);
+        };
+        Ok(Some(super::discovery::AutoSession {
+            session_id: id.to_owned(),
+            cwd,
+            created_at,
+            preview: preview.map(|text| text.chars().take(1000).collect()),
+        }))
+    }
+
     fn resume_command(&self, session_id: &str) -> Command {
         let mut command = Command::new("claude");
         command.arg("--resume").arg(session_id);
@@ -79,6 +130,31 @@ fn claude_data_dir() -> Result<PathBuf> {
 
     let home = dirs::home_dir().context("could not determine the home directory")?;
     Ok(home.join(".claude"))
+}
+
+fn project_files(root: &Path, cwd: &Path) -> Result<Vec<PathBuf>> {
+    let physical = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_owned());
+    let encode = |path: &Path| {
+        path.to_string_lossy()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+    };
+    let mut directories = vec![root.join(encode(cwd)), root.join(encode(&physical))];
+    directories.sort();
+    directories.dedup();
+    let mut files = Vec::new();
+    for directory in directories {
+        // Only top-level session files: never descend into subagents/worktrees.
+        files.extend(super::discovery::jsonl_files(&directory)?);
+    }
+    Ok(files)
 }
 
 fn find_session_in_projects(
@@ -242,23 +318,22 @@ fn read_session_metadata(path: &Path, session_id: &str) -> Result<Option<Session
             }
         }
 
-        if value.get("type").and_then(Value::as_str) == Some("ai-title") && belongs_to_session {
-            if title.is_none() {
-                title = value
-                    .get("aiTitle")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned);
-            }
+        if value.get("type").and_then(Value::as_str) == Some("ai-title")
+            && belongs_to_session
+            && title.is_none()
+        {
+            title = value
+                .get("aiTitle")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
         }
 
-        if belongs_to_session {
-            if let Some(prompt) = user_prompt(&value) {
-                if first_user_prompt.is_none() {
-                    first_user_prompt = Some(prompt.clone());
-                }
-                if prompt_preview.is_none() && !is_non_task_prompt(&prompt) {
-                    prompt_preview = Some(prompt);
-                }
+        if belongs_to_session && let Some(prompt) = user_prompt(&value) {
+            if first_user_prompt.is_none() {
+                first_user_prompt = Some(prompt.clone());
+            }
+            if prompt_preview.is_none() && !is_non_task_prompt(&prompt) {
+                prompt_preview = Some(prompt);
             }
         }
     }
@@ -288,17 +363,15 @@ fn read_handoff_context(path: &Path, session_id: &str) -> Result<Option<HandoffC
             && record_session_id(&value).is_none();
         if value.get("type").and_then(Value::as_str) == Some("summary")
             && (belongs_to_session || is_file_local_summary)
+            && let Some(value) = value.get("summary").and_then(Value::as_str)
         {
-            if let Some(value) = value.get("summary").and_then(Value::as_str) {
-                summary = Some(value.to_owned());
-            }
+            summary = Some(value.to_owned());
         }
         if belongs_to_session
             && let Some(prompt) = user_prompt(&value).filter(|prompt| !is_non_task_prompt(prompt))
+            && requests.last() != Some(&prompt)
         {
-            if requests.last() != Some(&prompt) {
-                requests.push(prompt);
-            }
+            requests.push(prompt);
         }
     }
 

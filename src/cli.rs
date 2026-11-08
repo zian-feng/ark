@@ -5,6 +5,7 @@ use std::{io::IsTerminal, path::PathBuf};
 use crate::{config::Config, core, hooks, tui};
 
 const DESCRIPTION_DISPLAY_LENGTH: usize = 80;
+const ALIAS_DISPLAY_LENGTH: usize = 25;
 
 #[derive(Parser)]
 #[command(name = "ark", about = "Save and resume AI coding sessions")]
@@ -92,10 +93,17 @@ enum Command {
         shell: Shell,
     },
 
-    #[command(hide = true)]
+    #[command(name = "_hook", hide = true)]
     Hook {
         #[command(subcommand)]
         command: HookCommand,
+    },
+
+    /// Shell-completion plumbing. This output is intentionally not human-formatted.
+    #[command(name = "_complete", hide = true)]
+    Complete {
+        #[command(subcommand)]
+        command: CompleteCommand,
     },
 }
 
@@ -124,6 +132,12 @@ enum HookCommand {
         #[arg(long)]
         pid: u32,
     },
+}
+
+#[derive(Subcommand)]
+enum CompleteCommand {
+    /// Print one saved Ark key per line for shell completion.
+    Aliases,
 }
 
 impl Cli {
@@ -228,6 +242,17 @@ impl Cli {
                 hooks::post(pid)?;
             }
 
+            (
+                Some(Command::Complete {
+                    command: CompleteCommand::Aliases,
+                }),
+                None,
+            ) => {
+                for session in core::list::list_sessions()? {
+                    println!("{}", session.id);
+                }
+            }
+
             (None, None) if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
                 if let Some(key) = tui::run()? {
                     core::open::open_session(&key)?;
@@ -309,6 +334,7 @@ fn print_list() -> Result<()> {
         } else {
             &session.id
         };
+        let alias = truncate_for_display(alias, ALIAS_DISPLAY_LENGTH);
         let description = truncate_description_for_display(&session.description);
 
         println!(
@@ -321,15 +347,14 @@ fn print_list() -> Result<()> {
 }
 
 fn truncate_description_for_display(description: &str) -> String {
-    if description.chars().count() <= DESCRIPTION_DISPLAY_LENGTH {
-        return description.to_owned();
-    }
+    truncate_for_display(description, DESCRIPTION_DISPLAY_LENGTH)
+}
 
-    let shortened = description
-        .chars()
-        .take(DESCRIPTION_DISPLAY_LENGTH - 1)
-        .collect::<String>();
-    format!("{shortened}…")
+fn truncate_for_display(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value.to_owned();
+    }
+    format!("{}…", value.chars().take(limit - 1).collect::<String>())
 }
 
 #[cfg(test)]

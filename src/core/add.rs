@@ -1,6 +1,6 @@
 use crate::{
     providers::{self, DiscoveredSession},
-    slug::slugify,
+    slug::{MAX_ALIAS_LENGTH, auto_slugify, slugify},
     storage::{Database, MAX_DESCRIPTION_LENGTH, NewSession, Session},
 };
 
@@ -18,7 +18,7 @@ pub fn add_new_session(
             let provider = providers::get_provider(provider_name)
                 .with_context(|| format!("unknown provider `{provider_name}`"))?;
 
-            let session = match provider.find_session_by_id(session_id)? {
+            match provider.find_session_by_id(session_id)? {
                 Some(session) => session,
                 None => {
                     let matches =
@@ -48,9 +48,7 @@ pub fn add_new_session(
                         }
                     }
                 }
-            };
-
-            session
+            }
         }
         None => providers::auto_detect_provider(session_id)?,
     };
@@ -133,7 +131,7 @@ pub fn add_discovered_session(discovered: DiscoveredSession) -> Result<Option<Se
         discovered.provider,
         &discovered.session_id,
     )?;
-    let base_id = slugify(&description);
+    let base_id = auto_slugify(&description);
     let base_id = if base_id.is_empty() {
         discovered.session_id.clone()
     } else {
@@ -160,7 +158,14 @@ fn next_available_alias(database: &Database, base_id: &str) -> Result<String> {
     }
 
     for number in 2.. {
-        let candidate = format!("{base_id}-{number}");
+        let suffix = format!("-{number}");
+        let prefix = base_id
+            .chars()
+            .take(MAX_ALIAS_LENGTH.saturating_sub(suffix.len()))
+            .collect::<String>()
+            .trim_end_matches('-')
+            .to_owned();
+        let candidate = format!("{prefix}{suffix}");
         if database.find_session_id_by_alias(&candidate)?.is_none() {
             return Ok(candidate);
         }
@@ -216,7 +221,7 @@ fn normalize_automatic_description(description: &str) -> Option<String> {
 mod tests {
     use crate::storage::MAX_DESCRIPTION_LENGTH;
 
-    use super::choose_description;
+    use super::{choose_description, next_available_alias};
 
     #[test]
     fn user_description_overrides_the_automatic_description() {
@@ -266,5 +271,28 @@ mod tests {
         .expect_err("an overlong description should be rejected");
 
         assert!(error.to_string().contains("at most"));
+    }
+
+    #[test]
+    fn collision_suffix_stays_within_the_alias_limit() -> anyhow::Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let database = crate::storage::Database::open_at(temporary.path().join("ark.db"))?;
+        let base = "a".repeat(crate::slug::MAX_ALIAS_LENGTH);
+        database.add_session(crate::storage::NewSession {
+            id: base.clone(),
+            session_id: "one".to_owned(),
+            provider: "codex".to_owned(),
+            cwd: temporary.path().to_owned(),
+            description: None,
+            tags: None,
+            starred: false,
+        })?;
+        let candidate = next_available_alias(&database, &base)?;
+        assert_eq!(
+            candidate,
+            format!("{}-2", "a".repeat(crate::slug::MAX_ALIAS_LENGTH - 2))
+        );
+        assert_eq!(candidate.len(), crate::slug::MAX_ALIAS_LENGTH);
+        Ok(())
     }
 }

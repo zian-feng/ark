@@ -73,6 +73,62 @@ impl Provider for CodexProvider {
         find_recent_rollout(&codex_sessions_dir()?, cwd, started_at, self.name())
     }
 
+    fn auto_session_files(
+        &self,
+        _cwd: &Path,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<PathBuf>> {
+        dated_rollouts(&codex_sessions_dir()?, start, end)
+    }
+
+    fn read_auto_session(&self, path: &Path) -> Result<Option<super::discovery::AutoSession>> {
+        let records = super::discovery::records(path)?;
+        let Some(meta) = records
+            .iter()
+            .find(|record| record["type"] == "session_meta")
+        else {
+            return Ok(None);
+        };
+        let payload = &meta["payload"];
+        // Child-agent transcripts must not become the parent terminal session.
+        if payload["source"].is_object()
+            || payload["thread_source"]
+                .as_str()
+                .is_some_and(|source| source != "user")
+        {
+            return Ok(None);
+        }
+        let (Some(id), Some(cwd), Some(timestamp)) = (
+            payload["id"]
+                .as_str()
+                .or_else(|| payload["session_id"].as_str()),
+            payload["cwd"].as_str(),
+            payload["timestamp"]
+                .as_str()
+                .or_else(|| meta["timestamp"].as_str()),
+        ) else {
+            return Ok(None);
+        };
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(&format!("-{id}.jsonl")))
+        {
+            return Ok(None);
+        }
+        Ok(Some(super::discovery::AutoSession {
+            session_id: id.to_owned(),
+            cwd: cwd.into(),
+            created_at: DateTime::parse_from_rfc3339(timestamp)?.with_timezone(&Utc),
+            preview: records
+                .iter()
+                .filter_map(user_message)
+                .find(|text| !is_non_task_prompt(text))
+                .map(|text| text.chars().take(1000).collect()),
+        }))
+    }
+
     fn extract_handoff(&self, session_id: &str) -> Result<Option<HandoffContext>> {
         let Some(path) = find_rollout_file(&codex_sessions_dir()?, session_id)? else {
             return Ok(None);
@@ -99,6 +155,26 @@ fn codex_sessions_dir() -> Result<PathBuf> {
     }
     let home = dirs::home_dir().context("could not determine the home directory")?;
     Ok(home.join(".codex").join("sessions"))
+}
+
+fn dated_rollouts(root: &Path, start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Vec<PathBuf>> {
+    // Include adjacent UTC dates for provider stores laid out using local time.
+    let mut date = start.date_naive() - chrono::Duration::days(1);
+    let last = end.date_naive() + chrono::Duration::days(1);
+    let mut files = Vec::new();
+    while date <= last {
+        files.extend(
+            super::discovery::jsonl_files(&root.join(date.format("%Y/%m/%d").to_string()))?
+                .into_iter()
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("rollout-"))
+                }),
+        );
+        date += chrono::Duration::days(1);
+    }
+    Ok(files)
 }
 
 fn find_rollout_file(root: &Path, session_id: &str) -> Result<Option<PathBuf>> {
@@ -256,10 +332,10 @@ fn read_handoff_context(path: &Path, expected_session_id: &str) -> Result<Option
     let mut requests = Vec::new();
     for line in BufReader::new(file).lines() {
         let value: Value = serde_json::from_str(&line?)?;
-        if let Some(message) = user_message(&value).filter(|message| !is_non_task_prompt(message)) {
-            if requests.last() != Some(&message) {
-                requests.push(message);
-            }
+        if let Some(message) = user_message(&value).filter(|message| !is_non_task_prompt(message))
+            && requests.last() != Some(&message)
+        {
+            requests.push(message);
         }
     }
 

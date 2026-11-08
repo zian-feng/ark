@@ -8,6 +8,8 @@ use ratatui::{
 
 use super::app::App;
 
+const ALIAS_DISPLAY_LENGTH: usize = 25;
+
 pub fn render(frame: &mut Frame, app: &App) {
     let areas = Layout::default()
         .direction(Direction::Vertical)
@@ -37,10 +39,11 @@ pub fn render(frame: &mut Frame, app: &App) {
             } else {
                 &session.id
             };
+            let alias = truncate(alias, ALIAS_DISPLAY_LENGTH);
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{marker} "), Style::default().fg(Color::Yellow)),
                 Span::styled(
-                    format!("{alias:<25}"),
+                    format!("{alias:<ALIAS_DISPLAY_LENGTH$}"),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(format!("  {:<8}  ", session.provider)),
@@ -69,4 +72,11 @@ pub fn render(frame: &mut Frame, app: &App) {
         .block(Block::default().borders(Borders::TOP))
         .wrap(Wrap { trim: true });
     frame.render_widget(footer, areas[2]);
+}
+
+fn truncate(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value.to_owned();
+    }
+    format!("{}…", value.chars().take(limit - 1).collect::<String>())
 }

@@ -1,5 +1,6 @@
 mod claude;
 mod codex;
+pub mod discovery;
 
 use std::{
     env,
@@ -40,6 +41,13 @@ pub trait Provider {
     fn is_available(&self) -> bool;
     fn id_hint_priority(&self, hint: SessionIdHint) -> u8;
     fn find_session_by_id(&self, session_id: &str) -> Result<Option<DiscoveredSession>>;
+    fn auto_session_files(
+        &self,
+        cwd: &Path,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<PathBuf>>;
+    fn read_auto_session(&self, path: &Path) -> Result<Option<discovery::AutoSession>>;
     fn find_recent_session(
         &self,
         cwd: &Path,

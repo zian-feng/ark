@@ -68,7 +68,6 @@ impl Database {
     }
 
     /// open a db from an explicit path for testing
-
     pub fn open_at(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
 
